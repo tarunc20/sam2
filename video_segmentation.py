@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import os 
 import argparse 
+import json
 import cv2
 import yaml 
 import numpy as np
@@ -91,15 +92,21 @@ model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
 predictor = build_sam2_video_predictor(model_cfg, checkpoint)
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--h5_file", type=str)
 parser.add_argument("--out_dir", type=str)
-parser.add_argument("-x", "--x_coords", nargs='+', type=int)
-parser.add_argument("-y", "--y_coords", nargs='+', type=int)
+parser.add_argument("-x", "--x_coords", type=str, help="JSON string of lists of x coordinates, e.g., '[[320, 400], [350], [310, 290]]'")
+parser.add_argument("-y", "--y_coords", type=str, help="JSON string of lists of y coordinates, e.g., '[[240, 250], [230], [210, 220]]'")
 parser.add_argument("--t", type=str)
 args = parser.parse_args()
-#assert(len(args.x_coords) == len(args.y_coords)), "Must have the same number of x and y coords"
-pixels = [[x, y] for x, y in zip(args.x_coords, args.y_coords)]
-data = h5py.File(args.h5_file, "r")
+# Parse JSON strings to lists
+x_coords = json.loads(args.x_coords)
+y_coords = json.loads(args.y_coords)
+assert len(x_coords) == len(y_coords), "Must have the same number of x and y coordinate lists"
+# Pixels is now a list where each element corresponds to the pixels for one camera
+pixels = []
+for cam_x, cam_y in zip(x_coords, y_coords):
+    assert len(cam_x) == len(cam_y), f"Camera {len(pixels)}: x and y lists must have the same length"
+    pixels.append([[x, y] for x, y in zip(cam_x, cam_y)])
+data = h5py.File(f"{args.out_dir}/data00000000.h5", "r")
 
 
 # make this an argument 
@@ -117,8 +124,12 @@ for cam in range(8):
         state = predictor.init_state(video_dir, offload_video_to_cpu=True, offload_state_to_cpu=True)
         ann_frame_idx = 0
         ann_obj_id = 255
-        points = np.array([pixels[cam]], dtype=np.float32)
-        labels = np.array([255], dtype=np.int32)
+        # Use the same point twice to create multiple prompts
+        cam_pixels = pixels[cam] if cam < len(pixels) else [[320, 240]]  # Default pixel if not provided
+        # Create points array from all pixels for this camera
+        points = np.array(cam_pixels, dtype=np.float32)
+        # Create corresponding labels (all 255)
+        labels = np.array([255] * len(cam_pixels), dtype=np.int32)
         out_masks = []
         _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
             inference_state=state,
@@ -136,7 +147,6 @@ for cam in range(8):
             imgs[i] = imgs[i].astype(np.float64) / 255.
             imgs[i][out_masks[i]] = imgs[i][out_masks[i]] * 0.5 + np.array((1, 0, 0))[None, None, :] * 0.5
             imgs[i] = (imgs[i] * 255).astype(np.uint8)
-
         all_pcds = [depth2xyzmap(data['depths'][i, cam], np.asarray(camera_info[cam]["color_intrinsic_matrix"]))[out_masks[i]] 
                         for i in range(len(out_masks))]
         for i in range(len(all_pcds)):
